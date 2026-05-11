@@ -1118,6 +1118,172 @@ describe("short-term promotion", () => {
     ).toBe(true);
   });
 
+  it("treats markdown skeleton placeholders as non-promotable", () => {
+    expect(__testing.isPlaceholderShortTermSnippet("-")).toBe(true);
+    expect(__testing.isPlaceholderShortTermSnippet("*")).toBe(true);
+    expect(__testing.isPlaceholderShortTermSnippet("+")).toBe(true);
+    expect(
+      __testing.isPlaceholderShortTermSnippet("## Tagesnotizen\n-\n## Entscheidungen\n-"),
+    ).toBe(true);
+    expect(__testing.isPlaceholderShortTermSnippet("- Keep gateway restarts supervised.")).toBe(
+      false,
+    );
+    expect(
+      __testing.isPlaceholderShortTermSnippet("## Tagesnotizen\n- Always check the queue depth."),
+    ).toBe(false);
+  });
+
+  it("treats placeholders and contamination as unpromotable", () => {
+    expect(__testing.isUnpromotableShortTermSnippet("")).toBe(true);
+    expect(__testing.isUnpromotableShortTermSnippet("-")).toBe(true);
+    expect(
+      __testing.isUnpromotableShortTermSnippet(
+        "Candidate: Default to action. confidence: 0.76 evidence: memory/.dreams/session-corpus/2026-04-08.txt:1-1 recalls: 3 status: staged",
+      ),
+    ).toBe(true);
+    expect(__testing.isUnpromotableShortTermSnippet("- Keep gateway restarts supervised.")).toBe(
+      false,
+    );
+  });
+
+  it("rejects short or token-thin relocation substrings", () => {
+    expect(__testing.isMeaningfulRelocationSubstring("-")).toBe(false);
+    expect(__testing.isMeaningfulRelocationSubstring("ok ok ok")).toBe(false);
+    expect(
+      __testing.isMeaningfulRelocationSubstring("Always supervised gateway restart routine"),
+    ).toBe(true);
+  });
+
+  it("does not record placeholder-only grounded candidates for promotion", async () => {
+    await withTempWorkspace(async (workspaceDir) => {
+      await writeDailyMemoryNote(workspaceDir, "2026-05-08", [
+        "## Tagesnotizen",
+        "-",
+        "## Entscheidungen",
+        "-",
+      ]);
+
+      await recordGroundedShortTermCandidates({
+        workspaceDir,
+        query: "__dreaming_grounded_backfill__",
+        items: [
+          {
+            path: "memory/2026-05-08.md",
+            startLine: 2,
+            endLine: 2,
+            snippet: "-",
+            score: 0.92,
+            query: "__dreaming_grounded_backfill__:lasting-update",
+            signalCount: 2,
+            dayBucket: "2026-05-08",
+          },
+          {
+            path: "memory/2026-05-08.md",
+            startLine: 2,
+            endLine: 2,
+            snippet: "-",
+            score: 0.85,
+            query: "__dreaming_grounded_backfill__:candidate",
+            signalCount: 1,
+            dayBucket: "2026-05-08",
+          },
+        ],
+        dedupeByQueryPerDay: true,
+        nowMs: Date.parse("2026-05-08T10:00:00.000Z"),
+      });
+
+      const ranked = await rankShortTermPromotionCandidates({
+        workspaceDir,
+        minScore: 0,
+        minRecallCount: 0,
+        minUniqueQueries: 0,
+        nowMs: Date.parse("2026-05-08T10:00:00.000Z"),
+      });
+      expect(ranked).toStrictEqual([]);
+    });
+  });
+
+  it("does not record placeholder-only live recalls", async () => {
+    await withTempWorkspace(async (workspaceDir) => {
+      await writeDailyMemoryNote(workspaceDir, "2026-05-08", ["## Tagesnotizen", "-"]);
+
+      await recordShortTermRecalls({
+        workspaceDir,
+        query: "daily skeleton",
+        results: [
+          {
+            path: "memory/2026-05-08.md",
+            source: "memory",
+            startLine: 2,
+            endLine: 2,
+            score: 0.85,
+            snippet: "-",
+          },
+        ],
+      });
+
+      const store = JSON.parse(
+        await fs.readFile(resolveShortTermRecallStorePath(workspaceDir), "utf-8"),
+      ) as { entries: Record<string, unknown> };
+      expect(store.entries).toEqual({});
+    });
+  });
+
+  it("does not rehydrate section summaries onto empty bullet placeholders", async () => {
+    await withTempWorkspace(async (workspaceDir) => {
+      // Daily note no longer contains the original claim; only the empty bullet remains.
+      await writeDailyMemoryNote(workspaceDir, "2026-05-08", [
+        "## Tagesnotizen",
+        "-",
+        "## Entscheidungen",
+        "-",
+      ]);
+
+      const nowMs = Date.parse("2026-05-08T10:00:00.000Z");
+      const applied = await applyShortTermPromotions({
+        workspaceDir,
+        minScore: 0,
+        minRecallCount: 0,
+        minUniqueQueries: 0,
+        nowMs,
+        candidates: [
+          {
+            key: "memory:memory/2026-05-08.md:2:2:abc123",
+            path: "memory/2026-05-08.md",
+            startLine: 2,
+            endLine: 2,
+            source: "memory",
+            snippet: "Always supervise gateway restart routine for parity audits.",
+            recallCount: 4,
+            dailyCount: 0,
+            groundedCount: 4,
+            signalCount: 4,
+            avgScore: 0.92,
+            maxScore: 0.95,
+            score: 0.9,
+            uniqueQueries: 3,
+            recallDays: ["2026-05-06", "2026-05-07", "2026-05-08"],
+            conceptTags: [],
+            ageDays: 0,
+            firstRecalledAt: "2026-05-06T10:00:00.000Z",
+            lastRecalledAt: "2026-05-08T10:00:00.000Z",
+            components: {
+              frequency: 0.6,
+              relevance: 0.9,
+              diversity: 0.4,
+              recency: 1,
+              consolidation: 0.5,
+              conceptual: 0.2,
+            },
+          },
+        ],
+      });
+
+      expect(applied.applied).toBe(0);
+      await expectEnoent(fs.readFile(path.join(workspaceDir, "MEMORY.md"), "utf-8"));
+    });
+  });
+
   it("skips direct candidates that exceed maxAgeDays during apply", async () => {
     await withTempWorkspace(async (workspaceDir) => {
       const applied = await applyShortTermPromotions({

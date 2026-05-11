@@ -309,6 +309,42 @@ function isContaminatedDreamingSnippet(raw: string): boolean {
   return hasNarrativeLead && hasConfidence && hasEvidence && hasStatus && hasRecalls;
 }
 
+function isMarkdownPlaceholderLine(raw: string): boolean {
+  const line = raw.trim();
+  if (!line || /^[-*+]$/.test(line)) {
+    return true;
+  }
+  if (/^#{1,6}\s+\S/.test(line)) {
+    return !/\s[-*+]\s+\S/.test(line);
+  }
+  return false;
+}
+
+function isPlaceholderShortTermSnippet(raw: string): boolean {
+  const snippet = normalizeSnippet(raw);
+  if (!snippet || /^[-*+]$/.test(snippet)) {
+    return true;
+  }
+  const lines = raw.split(/\r?\n/);
+  const nonEmpty = lines.map((line) => line.trim()).filter(Boolean);
+  return nonEmpty.length > 0 && lines.every(isMarkdownPlaceholderLine);
+}
+
+function isUnpromotableShortTermSnippet(raw: string): boolean {
+  const snippet = normalizeSnippet(raw);
+  return !snippet || isPlaceholderShortTermSnippet(raw) || isContaminatedDreamingSnippet(snippet);
+}
+
+function isMeaningfulRelocationSubstring(raw: string): boolean {
+  if (isPlaceholderShortTermSnippet(raw)) {
+    return false;
+  }
+  const tokens = normalizeSnippet(raw)
+    .split(/[^A-Za-z0-9_]+/)
+    .filter((token) => token.length >= 3);
+  return tokens.length >= 3 && tokens.join("").length >= 18;
+}
+
 function normalizeMemoryPath(rawPath: string): string {
   return rawPath.replaceAll("\\", "/").replace(/^\.\//, "");
 }
@@ -483,7 +519,7 @@ function normalizeStore(raw: unknown, nowIso: string): ShortTermRecallStore {
           ? entry.claimHash.trim()
           : undefined;
       const snippet = typeof entry.snippet === "string" ? normalizeSnippet(entry.snippet) : "";
-      if (snippet && isContaminatedDreamingSnippet(snippet)) {
+      if (snippet && isUnpromotableShortTermSnippet(snippet)) {
         continue;
       }
       const queryHashes = Array.isArray(entry.queryHashes)
@@ -958,7 +994,7 @@ export async function recordShortTermRecalls(params: {
     for (const result of relevant) {
       const normalizedPath = normalizeMemoryPath(result.path);
       const snippet = normalizeSnippet(result.snippet);
-      if (!snippet || isContaminatedDreamingSnippet(snippet)) {
+      if (isUnpromotableShortTermSnippet(snippet)) {
         continue;
       }
       const claimHash = snippet ? buildClaimHash(snippet) : undefined;
@@ -1065,8 +1101,7 @@ export async function recordGroundedShortTermCandidates(params: {
       const snippet = normalizeSnippet(item.snippet);
       const normalizedPath = normalizeMemoryPath(item.path);
       if (
-        !snippet ||
-        isContaminatedDreamingSnippet(snippet) ||
+        isUnpromotableShortTermSnippet(snippet) ||
         !normalizedPath ||
         !isShortTermMemoryPath(normalizedPath) ||
         !Number.isFinite(item.startLine) ||
@@ -1249,7 +1284,7 @@ export async function rankShortTermPromotionCandidates(
     if (!entry || entry.source !== "memory" || !isShortTermMemoryPath(entry.path)) {
       continue;
     }
-    if (isContaminatedDreamingSnippet(entry.snippet)) {
+    if (isUnpromotableShortTermSnippet(entry.snippet)) {
       continue;
     }
     if (!includePromoted && entry.promotedAt) {
@@ -1411,10 +1446,10 @@ function compareCandidateWindow(
   if (windowSnippet === targetSnippet) {
     return { matched: true, quality: 3 };
   }
-  if (windowSnippet.includes(targetSnippet)) {
+  if (isMeaningfulRelocationSubstring(targetSnippet) && windowSnippet.includes(targetSnippet)) {
     return { matched: true, quality: 2 };
   }
-  if (targetSnippet.includes(windowSnippet)) {
+  if (isMeaningfulRelocationSubstring(windowSnippet) && targetSnippet.includes(windowSnippet)) {
     return { matched: true, quality: 1 };
   }
   return { matched: false, quality: 0 };
@@ -1587,7 +1622,7 @@ export async function applyShortTermPromotions(
     const store = await readStore(workspaceDir, nowIso);
     const selected = options.candidates
       .filter((candidate) => {
-        if (isContaminatedDreamingSnippet(candidate.snippet)) {
+        if (isUnpromotableShortTermSnippet(candidate.snippet)) {
           return false;
         }
         if (candidate.promotedAt) {
@@ -1625,7 +1660,7 @@ export async function applyShortTermPromotions(
     const rehydratedSelected: PromotionCandidate[] = [];
     for (const candidate of selected) {
       const rehydrated = await rehydratePromotionCandidate(workspaceDir, candidate);
-      if (rehydrated && !isContaminatedDreamingSnippet(rehydrated.snippet)) {
+      if (rehydrated && !isUnpromotableShortTermSnippet(rehydrated.snippet)) {
         rehydratedSelected.push(rehydrated);
       }
     }
@@ -2018,4 +2053,8 @@ export const __testing = {
   buildClaimHash,
   totalSignalCountForEntry,
   isContaminatedDreamingSnippet,
+  isMarkdownPlaceholderLine,
+  isPlaceholderShortTermSnippet,
+  isUnpromotableShortTermSnippet,
+  isMeaningfulRelocationSubstring,
 };
